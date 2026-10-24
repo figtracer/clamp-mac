@@ -107,10 +107,20 @@ output.
 
 ## Differences in this port
 
-- The UI is a plain iPlug2 vector UI, not the original artwork. The
-  preset browser, the tooltips, and the `%APPDATA%` settings file are
+- The UI copies the original's layout with vector drawing of its own.
+  None of the original's artwork, fonts, or logo is used; the font is
+  Inter (OFL). The preset browser and the `%APPDATA%` settings file are
   not ported.
-- Meters use iPlug2's `IPeakAvgSender` on the block input and output.
-  The original meters the per-component levels.
+- The original sets oversampling in `ProcessBlock`. Version 1.0.0 of the
+  port set it from `OnParamChange` and left the oversampler at a
+  512-sample block, which can corrupt audio with larger host buffers.
+  1.1.0 fixes both.
+
+## Verification
+
+`tools/emulate/` runs the original DLL's own `Waveshaper::Process` and
+`ProcessBlock` under Unicorn and compares them with the port. 2880 cases
+across all TYPE, MODE, CEILING, SHAPE, and gain settings show no
+difference above 1e-9.
 - The port uses its own plugin IDs and name (`Clamp Port`, `clamp-mac`).
   Projects saved with the Windows plugin do not open it.

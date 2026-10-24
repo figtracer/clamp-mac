@@ -1,7 +1,7 @@
 #define PLUG_NAME "Clamp Port"
 #define PLUG_MFR "clamp-mac"
-#define PLUG_VERSION_HEX 0x00010000
-#define PLUG_VERSION_STR "1.0.0"
+#define PLUG_VERSION_HEX 0x00010100
+#define PLUG_VERSION_STR "1.1.0"
 #define PLUG_UNIQUE_ID 'Clmp'
 #define PLUG_MFR_ID 'CmMc'
 #define PLUG_URL_STR "https://github.com/"
@@ -56,4 +56,6 @@
 #define APP_COPY_AUV3 0
 #define APP_SIGNAL_VECTOR_SIZE 64
 
-#define ROBOTO_FN "Roboto-Regular.ttf"
+#define INTER_REGULAR_FN "Inter-Regular.ttf"
+#define INTER_SEMIBOLD_FN "Inter-SemiBold.ttf"
+#define INTER_BOLD_FN "Inter-Bold.ttf"

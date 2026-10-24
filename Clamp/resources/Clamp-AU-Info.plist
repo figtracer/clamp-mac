@@ -30,7 +30,7 @@
 	<key>CFBundleExecutable</key>
 	<string>Clamp</string>
 	<key>CFBundleGetInfoString</key>
-	<string>Clamp v1.0.0 unofficial macOS port</string>
+	<string>Clamp v1.1.0 unofficial macOS port</string>
 	<key>CFBundleIdentifier</key>
 	<string>com.clamp-mac.audiounit.Clamp</string>
 	<key>CFBundleInfoDictionaryVersion</key>
@@ -40,11 +40,11 @@
 	<key>CFBundlePackageType</key>
 	<string>BNDL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>1.0.0</string>
+	<string>1.1.0</string>
 	<key>CFBundleSignature</key>
 	<string>Clmp</string>
 	<key>CFBundleVersion</key>
-	<string>1.0.0</string>
+	<string>1.1.0</string>
 	<key>CSResourcesFileMapped</key>
 	<true/>
 	<key>LSMinimumSystemVersion</key>

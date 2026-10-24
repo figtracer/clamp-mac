@@ -47,6 +47,7 @@ for your own machine.
   binary, and how it was found.
 - `tools/rea-session/`: keeps one REA MCP session open, so queries do not
   re-import the binary each time.
+- `tools/emulate/`: runs the original DLL's DSP under an x86-64 emulator and compares it with the port.
 - `tests/`: checks the shapers against the recovered formulas.
 
 ```bash

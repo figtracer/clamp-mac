@@ -37,41 +37,7 @@ Clamp::Clamp(const InstanceInfo& info)
   };
 
   mLayoutFunc = [&](IGraphics* pGraphics) {
-    pGraphics->AttachCornerResizer(EUIResizerMode::Scale, false);
-    pGraphics->AttachPanelBackground(IColor(255, 30, 32, 36));
-    pGraphics->LoadFont("Roboto-Regular", ROBOTO_FN);
-
-    const IVStyle style = DEFAULT_STYLE
-      .WithColor(kBG, IColor(255, 30, 32, 36))
-      .WithColor(kFG, IColor(255, 52, 56, 64))
-      .WithColor(kPR, IColor(255, 240, 160, 60))
-      .WithColor(kX1, IColor(255, 240, 160, 60))
-      .WithLabelText(IText(13.f, COLOR_LIGHT_GRAY, "Roboto-Regular"))
-      .WithValueText(IText(12.f, COLOR_WHITE, "Roboto-Regular"))
-      .WithDrawShadows(false);
-
-    const IRECT b = pGraphics->GetBounds().GetPadded(-10.f);
-    const IRECT top = b.GetFromTop(28.f);
-    pGraphics->AttachControl(new ITextControl(top.GetFromLeft(120.f), "CLAMP", IText(20.f, COLOR_WHITE, "Roboto-Regular", EAlign::Near)));
-    pGraphics->AttachControl(new IVToggleControl(top.GetFromRight(80.f), kBypass, "", style, "ACTIVE", "BYPASS"));
-
-    const IRECT body = b.GetReducedFromTop(36.f);
-    const IRECT meters = body.GetFromRight(60.f);
-    const IRECT controls = body.GetReducedFromRight(70.f);
-
-    const IRECT knobs = controls.GetFromTop(120.f);
-    const char* knobLabels[] = {"IN", "CEILING", "SHAPE", "OUT"};
-    const int knobParams[] = {kInputGain, kCeiling, kShape, kOutputGain};
-    for (int i = 0; i < 4; i++)
-      pGraphics->AttachControl(new IVKnobControl(knobs.GetGridCell(i, 1, 4), knobParams[i], knobLabels[i], style));
-
-    const IRECT switches = controls.GetReducedFromTop(130.f);
-    pGraphics->AttachControl(new IVTabSwitchControl(switches.GetGridCell(0, 3, 1).GetPadded(-2.f), kType, {}, "TYPE", style));
-    pGraphics->AttachControl(new IVTabSwitchControl(switches.GetGridCell(1, 3, 1).GetPadded(-2.f), kMode, {}, "MODE", style));
-    pGraphics->AttachControl(new IVTabSwitchControl(switches.GetGridCell(2, 3, 1).GetPadded(-2.f), kOversampling, {}, "OVERSAMPLING", style));
-
-    pGraphics->AttachControl(new IVPeakAvgMeterControl<2>(meters.GetGridCell(0, 1, 2), "IN", style.WithShowValue(false)), kCtrlTagInMeter);
-    pGraphics->AttachControl(new IVPeakAvgMeterControl<2>(meters.GetGridCell(1, 1, 2), "OUT", style.WithShowValue(false)), kCtrlTagOutMeter);
+    AttachClampUI(pGraphics, kCtrlTagDisplay);
   };
 #endif
 }
@@ -88,7 +54,9 @@ void Clamp::ProcessBlock(sample** inputs, sample** outputs, int nFrames)
     outs[1] = mMonoScratch.data();
   }
 
-  mInMeterSender.ProcessBlock(ins, nFrames, kCtrlTagInMeter);
+  // The display shows levels at the clipper: after IN gain and before OUT gain.
+  const bool bypassed = GetParam(kBypass)->Bool();
+  mDisplaySender.ProcessInput(ins, nFrames, bypassed ? 1. : DBToAmp(GetParam(kInputGain)->Value()));
 
   if (GetParam(kBypass)->Bool())
   {
@@ -119,6 +87,17 @@ void Clamp::ProcessBlock(sample** inputs, sample** outputs, int nFrames)
       ? static_cast<Waveshapers::Waveshaper&>(mNaiveClipper)
       : static_cast<Waveshapers::Waveshaper&>(mClipper);
 
+    // Apply oversampling changes on the audio thread, as the original does.
+    // SetOverSampling() resets to a 512-sample block, so size for the host.
+    const EFactor factor = OversamplingFactor(GetParam(kOversampling)->Int());
+    if (factor != mOversamplingFactor || nFrames > mOversamplingBlockSize)
+    {
+      mOversamplingFactor = factor;
+      mOversamplingBlockSize = std::max(GetBlockSize(), nFrames);
+      mOverSampler.SetOverSampling(factor);
+      mOverSampler.Reset(mOversamplingBlockSize);
+    }
+
     mOverSampler.ProcessBlock(ins, outs, nFrames, 2, 2, [&shaper](sample** in, sample** out, int n) {
       for (int s = 0; s < n; s++)
       {
@@ -131,26 +110,19 @@ void Clamp::ProcessBlock(sample** inputs, sample** outputs, int nFrames)
     });
   }
 
-  mOutMeterSender.ProcessBlock(outs, nFrames, kCtrlTagOutMeter);
+  mDisplaySender.ProcessOutput(outs, nFrames, bypassed ? 1. : DBToAmp(-GetParam(kOutputGain)->Value()), kCtrlTagDisplay);
 }
 
 void Clamp::OnReset()
 {
   mMonoScratch.assign(GetBlockSize(), 0.);
-  mOverSampler.Reset(GetBlockSize());
-  mInMeterSender.Reset(GetSampleRate());
-  mOutMeterSender.Reset(GetSampleRate());
+  mOversamplingBlockSize = GetBlockSize();
+  mOverSampler.Reset(mOversamplingBlockSize);
+  mDisplaySender.Reset(GetSampleRate());
 }
 
 void Clamp::OnIdle()
 {
-  mInMeterSender.TransmitData(*this);
-  mOutMeterSender.TransmitData(*this);
-}
-
-void Clamp::OnParamChange(int paramIdx)
-{
-  if (paramIdx == kOversampling)
-    mOverSampler.SetOverSampling(OversamplingFactor(GetParam(kOversampling)->Int()));
+  mDisplaySender.TransmitData(*this);
 }
 #endif
