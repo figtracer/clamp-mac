@@ -15,8 +15,19 @@ object built in emulated memory, and it can run the real `ProcessBlock`
 (`0x180548b40`) up to the oversampler call to read the shaper fields that it
 derives from the parameters.
 
-Exact-zero input to TYPE B is skipped. The CRT `log(0)` path raises a
-floating-point exception through `RaiseException`, which needs real Windows
-SEH. Silence gives 0 in both the original and the port.
+`block_diff.py` runs the whole original `ProcessBlock`, oversampler
+included, against the plugin's real audio code in `Clamp/ClampDSP.h`:
 
-Result at v1.0.0: 2880 cases, 0 mismatches above 1e-9.
+```bash
+c++ -std=c++17 -O2 -ffp-contract=off -I../../iPlug2/IPlug -I../../iPlug2/IPlug/Extras -I../../iPlug2/WDL port_block.cpp -o port_block
+.venv/bin/python block_diff.py /abs/path/to/Clamp.dll ./port_block
+```
+
+The emulator stands in for the Win32 heap calls the CRT allocator needs.
+It returns -inf for `log(0)` directly, because the CRT's error path
+needs Windows SEH. It also stubs out the GUI meter update.
+
+Results at 1.2.0: `diff.py` finds 0 differences above 1e-9 in 2880
+cases. `block_diff.py` finds 91.35% of 117,768 samples bit-identical,
+with a largest difference of 1.07e-14. The remaining differences are
+Microsoft CRT and macOS libm rounding in `tanh`, `log` and `exp`.

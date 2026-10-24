@@ -103,13 +103,14 @@ public:
 
   void Shape(double& x) override
   {
-    const double levelDB = 20. * std::log10(std::fabs(x));
+    // The original's constants: 20 / ln(10), and ln(10) / 20 cut to 13 digits.
+    const double levelDB = std::log(std::fabs(x)) * 8.685889638065037;
     double gainDB;
     if (mKneeDB > 0. && levelDB > mKneeLoDB && levelDB < mKneeHiDB)
       gainDB = ((levelDB - mKneeLoDB) / mKneeDB) * 0.5 * (mKneeLoDB - levelDB);
     else
       gainDB = std::min(mThresholdDB - levelDB, 0.);
-    x *= std::pow(10., gainDB / 20.);
+    x = std::exp(gainDB * 0.1151292546497) * x;
   }
 
 private:

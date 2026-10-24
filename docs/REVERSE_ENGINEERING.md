@@ -105,22 +105,63 @@ y = x * 10^(g / 20)
 Gains are read once per block, with no smoothing. Bypass copies input to
 output.
 
-## Differences in this port
+## How close the port is
 
-- The UI copies the original's layout with vector drawing of its own.
-  None of the original's artwork, fonts, or logo is used; the font is
-  Inter (OFL). The preset browser and the `%APPDATA%` settings file are
-  not ported.
-- The original sets oversampling in `ProcessBlock`. Version 1.0.0 of the
-  port set it from `OnParamChange` and left the oversampler at a
-  512-sample block, which can corrupt audio with larger host buffers.
-  1.1.0 fixes both.
+### Audio: matches, except libm rounding
 
-## Verification
+`tools/emulate/block_diff.py` runs the original `ProcessBlock`, with its
+oversampler, under emulation. It runs `Clamp/ClampDSP.h`, the code the
+plugin uses, on the same scenarios: 60 runs of sines, sweeps, noise and
+transients, with parameter, oversampling and bypass changes between
+blocks of 7 to 512 samples. Of 117,768 output samples, 91.35% are
+bit-identical. The largest difference is 1.07e-14 (about -280 dB).
 
-`tools/emulate/` runs the original DLL's own `Waveshaper::Process` and
-`ProcessBlock` under Unicorn and compares them with the port. 2880 cases
-across all TYPE, MODE, CEILING, SHAPE, and gain settings show no
-difference above 1e-9.
-- The port uses its own plugin IDs and name (`Clamp Port`, `clamp-mac`).
-  Projects saved with the Windows plugin do not open it.
+The rest comes from the C math library. The DLL links Microsoft's CRT
+`tanh`, `log` and `exp`. These differ from macOS libm in the last bit for
+2.4%, 0.04% and 0.5% of inputs. To remove it, the port would have to
+carry a copy of Microsoft's math code. It does not.
+
+Checked to match exactly:
+
+- Shaper formulas, gain staging, channel modes, and the dry/wet stage.
+- Parameter-to-DSP mapping, including the truncated dB constant
+  `0.1151292546497` and `20 / ln(10) = 8.685889638065037`.
+- All 21 HIIR oversampler coefficients, bit for bit.
+- Oversampler reset timing: only at construction and when OVERSAMPLING
+  changes (`OnParamChange`, `0x180549140`), never on host reset.
+- Mono: both always process two channels. An unconnected channel is
+  silence.
+- Parameter names, ranges, defaults, steps, units and types. BYPASS is
+  `InitBool`, which the compiler inlined.
+- No latency is reported, and parameters are not smoothed.
+
+One deliberate difference: when the host block grows past the size the
+oversampler was reset with, the original writes past its buffers. The
+port resets the oversampler for the new size instead.
+
+### UI: same layout, not the same implementation
+
+The original editor is built from these classes: `Header`, `Footer`,
+`BasePanel`, `GlassPanel`, `FramePanel`, `IndentDot`, `DynamicsDisplay`,
+`ThresholdSlider`, `BigKnob`, `KnobBase`, `Slider`, `SimpleSpinBox`,
+`ShapeDisplay`, `SimpleValueBox`, `ValueDisplay`, `DropMenu`,
+`ParamMenu`, `SVGButton`, `ColorMenu`, `TooltipDisplay`,
+`PresetManager`, `PresetList`, and `PresetListItem`.
+
+The port draws a similar layout with its own code. These parts are not
+ported:
+
+- The preset browser (`PresetManager`), which saves files to
+  `%APPDATA%/Clamp/Presets`.
+- The accent colour menu (`ColorMenu`) and its `Settings.ini`. This is
+  the red circle in the header. The port uses that button to freeze the
+  level display.
+- Oversampling as a drop-down menu (`DropMenu`). The port cycles
+  through the values.
+- `TooltipDisplay`. The original shows three tooltip texts: "Sets the
+  input gain of chosen channel(s)", "Sets the output gain of chosen
+  channel(s)", and "Clipper algorithm.".
+- How exactly the display scrolls and scales. The port shows the level
+  after IN gain and before OUT gain.
+
+The plugin name and IDs are also different, on purpose.
