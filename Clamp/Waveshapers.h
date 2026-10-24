@@ -34,23 +34,35 @@ public:
     const double dryL = l;
     const double dryR = r;
 
+    // Like the original, the meter levels are cleared for every sample. A
+    // channel that is not processed reads 0.
+    mPreL = mPreR = mPostL = mPostR = 0.;
+
     if (mMode < kModeMS)
     {
       if (mMode == kModeLR || mMode == kModeL)
-        ProcessOne(l);
+        ProcessOne(l, mPreL, mPostL);
       if (mMode == kModeLR || mMode == kModeR)
-        ProcessOne(r);
+        ProcessOne(r, mPreR, mPostR);
     }
     else
     {
       double m = (l + r) * 0.5;
       double s = (l - r) * 0.5;
+      double preM = 0.;
+      double postM = 0.;
+      double preS = 0.;
+      double postS = 0.;
       if (mMode == kModeMS || mMode == kModeM)
-        ProcessOne(m);
+        ProcessOne(m, preM, postM);
       if (mMode == kModeMS || mMode == kModeS)
-        ProcessOne(s);
+        ProcessOne(s, preS, postS);
       l = m + s;
       r = m - s;
+
+      // The original meters |M| + |S|, which is max(|L|, |R|) of the gained signal.
+      mPreL = mPreR = preM + preS;
+      mPostL = mPostR = postM + postS;
     }
 
     // The original keeps a dry/wet stage here that is always fully wet.
@@ -63,12 +75,20 @@ public:
   double mOutGain = 1.;
   double mMix = 1.;
 
+  /** Levels of the last sample for the meter: |x| after IN gain, and after the shaper and OUT gain. */
+  double mPreL = 0.;
+  double mPreR = 0.;
+  double mPostL = 0.;
+  double mPostR = 0.;
+
 private:
-  void ProcessOne(double& x)
+  void ProcessOne(double& x, double& pre, double& post)
   {
     x *= mInGain;
+    pre = std::fabs(x);
     Shape(x);
     x *= mOutGain;
+    post = std::fabs(x);
   }
 };
 

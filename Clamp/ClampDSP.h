@@ -16,6 +16,54 @@
 #include "Oversampler.h"
 #include "Waveshapers.h"
 
+/** The original's level meter (plugin + 0xbe8, update 0x180549360): a peak
+ * envelope with instant attack and a one-pole release, averaged over 2.5 ms
+ * windows of the oversampled signal. It sends one (post, pre) pair per window. */
+class ClampMeter
+{
+public:
+  /** Window length and release for the oversampled rate, as 0x180548eb0 sets them. */
+  void SetRate(double overSampledRate)
+  {
+    mWindow = std::max(1, static_cast<int>(overSampledRate * 0.0025));
+    mRelease = static_cast<float>((1. / (overSampledRate / 1000.)) * 0.015);
+  }
+
+  /** Adds one oversampled sample. At the start of each window, calls send(post, pre) with the window means. */
+  template <typename SendFunc>
+  void Add(double post, double pre, SendFunc& send)
+  {
+    if (mCount == 0)
+    {
+      const float n = static_cast<float>(mWindow);
+      send(mSum[0] / n, mSum[1] / n);
+      mSum[0] = 0.f;
+      mSum[1] = 0.f;
+    }
+
+    mCount = (mCount + 1) % mWindow;
+    Follow(0, post);
+    Follow(1, pre);
+  }
+
+private:
+  void Follow(int c, double value)
+  {
+    float x = std::fabs(static_cast<float>(value));
+    if (x < mEnvelope[c])
+      x = (x - mEnvelope[c]) * mRelease + mEnvelope[c];
+    mEnvelope[c] = x;
+    mSum[c] += x;
+  }
+
+  /** Constructor values of the original (5 ms at 48 kHz). The first block replaces them. */
+  int mWindow = 240;
+  float mRelease = 5.f / 48.f;
+  int mCount = 0;
+  float mEnvelope[2] = {0.f, 0.f};
+  float mSum[2] = {0.f, 0.f};
+};
+
 class ClampDSP
 {
 public:
@@ -37,8 +85,21 @@ public:
   /** The original's OnParamChange (0x180549140) arms this for OVERSAMPLING only. */
   void RequestOversamplingReset() { mResetPending = true; }
 
-  /** Processes two channels. Mirrors the original ProcessBlock (0x180548b40). */
+  /** Host sample rate, for the meter timing. */
+  void SetSampleRate(double sampleRate) { mSampleRate = sampleRate; }
+
+  /** Processes two channels without metering. */
   void Process(double** ins, double** outs, int nFrames, const Params& p)
+  {
+    auto ignore = [](float, float) {};
+    Process(ins, outs, nFrames, p, ignore);
+  }
+
+  /** Processes two channels. Mirrors the original ProcessBlock (0x180548b40).
+   * Like the original, it meters each oversampled sample after the shaper and
+   * calls sendMeter(post, pre) once per 2.5 ms window. Bypass sends nothing. */
+  template <typename SendMeterFunc>
+  void Process(double** ins, double** outs, int nFrames, const Params& p, SendMeterFunc& sendMeter)
   {
     if (p.bypass)
     {
@@ -74,9 +135,18 @@ public:
       mAllocatedBlockSize = std::max(mHostBlockSize, nFrames);
       mOverSampler.SetOverSampling(OversamplingFactor(p.oversampling));
       mOverSampler.Reset(mAllocatedBlockSize);
+      mOverSamplingRate = 1 << std::clamp(p.oversampling, 0, 4);
     }
 
-    mOverSampler.ProcessBlock(ins, outs, nFrames, 2, 2, [&shaper](double** in, double** out, int n) {
+    const double meterRate = mOverSamplingRate * mSampleRate;
+    if (meterRate != mMeterRate)
+    {
+      mMeterRate = meterRate;
+      mMeter.SetRate(meterRate);
+    }
+
+    ClampMeter& meter = mMeter;
+    mOverSampler.ProcessBlock(ins, outs, nFrames, 2, 2, [&shaper, &meter, &sendMeter](double** in, double** out, int n) {
       for (int s = 0; s < n; s++)
       {
         double l = in[0][s];
@@ -84,6 +154,7 @@ public:
         shaper.Process(l, r);
         out[0][s] = l;
         out[1][s] = r;
+        meter.Add(std::fmax(shaper.mPostL, shaper.mPostR), std::fmax(shaper.mPreL, shaper.mPreR), sendMeter);
       }
     });
   }
@@ -113,4 +184,8 @@ private:
   int mAllocatedBlockSize = 0;
   Waveshapers::NaiveClipper mNaiveClipper;
   Waveshapers::Clipper mClipper;
+  double mSampleRate = 48000.;
+  int mOverSamplingRate = 1;
+  double mMeterRate = 0.;
+  ClampMeter mMeter;
 };

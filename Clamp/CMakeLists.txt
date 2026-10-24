@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.14)
-project(Clamp VERSION 1.2.0)
+project(Clamp VERSION 1.3.0)
 
 if(NOT DEFINED IPLUG2_DIR)
   set(IPLUG2_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../iPlug2" CACHE PATH "iPlug2 root directory")
@@ -14,9 +14,15 @@ iplug_add_plugin(${PROJECT_NAME}
   SOURCES
     Clamp.cpp
     Clamp.h
+    ClampControls.cpp
+    ClampControls.h
     ClampDSP.h
+    ClampSettings.cpp
+    ClampSettings.h
     ClampUI.cpp
     ClampUI.h
+    ClampUIBase.h
+    ClampUIDraw.cpp
     Waveshapers.h
     resources/resource.h
   RESOURCES

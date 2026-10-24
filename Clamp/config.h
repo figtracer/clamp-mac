@@ -1,7 +1,7 @@
 #define PLUG_NAME "Clamp Port"
 #define PLUG_MFR "clamp-mac"
-#define PLUG_VERSION_HEX 0x00010200
-#define PLUG_VERSION_STR "1.2.0"
+#define PLUG_VERSION_HEX 0x00010300
+#define PLUG_VERSION_STR "1.3.0"
 #define PLUG_UNIQUE_ID 'Clmp'
 #define PLUG_MFR_ID 'CmMc'
 #define PLUG_URL_STR "https://github.com/"

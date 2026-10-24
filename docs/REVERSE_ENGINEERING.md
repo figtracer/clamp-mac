@@ -139,7 +139,7 @@ One deliberate difference: when the host block grows past the size the
 oversampler was reset with, the original writes past its buffers. The
 port resets the oversampler for the new size instead.
 
-### UI: same layout, not the same implementation
+### UI: same classes, numbers and behaviour
 
 The original editor is built from these classes: `Header`, `Footer`,
 `BasePanel`, `GlassPanel`, `FramePanel`, `IndentDot`, `DynamicsDisplay`,
@@ -148,20 +148,28 @@ The original editor is built from these classes: `Header`, `Footer`,
 `ParamMenu`, `SVGButton`, `ColorMenu`, `TooltipDisplay`,
 `PresetManager`, `PresetList`, and `PresetListItem`.
 
-The port draws a similar layout with its own code. These parts are not
-ported:
+The port has a class of the same name for each one that the editor shows
+(`Clamp/ClampControls.cpp`, `Clamp/ClampUI.cpp`), with the original's
+rects, attach order, gradients, colours, text styles, drag gearing,
+hover behaviour and `Settings.ini` keys. The level display gets the
+original's meter: a peak envelope (instant attack, 66.7 ms release) of
+each oversampled sample, averaged over 2.5 ms windows. The input level is
+after IN gain, and the output level is after the clipper and OUT gain.
+Bypass stops the display.
 
-- The preset browser (`PresetManager`), which saves files to
-  `%APPDATA%/Clamp/Presets`.
-- The accent colour menu (`ColorMenu`) and its `Settings.ini`. This is
-  the red circle in the header. The port uses that button to freeze the
-  level display.
-- Oversampling as a drop-down menu (`DropMenu`). The port cycles
-  through the values.
-- `TooltipDisplay`. The original shows three tooltip texts: "Sets the
-  input gain of chosen channel(s)", "Sets the output gain of chosen
-  channel(s)", and "Clipper algorithm.".
-- How exactly the display scrolls and scales. The port shows the level
-  after IN gain and before OUT gain.
+The preset classes are compiled into the original but cannot be reached:
+the `Header` flag that would create `PresetManager` is 0. The port does
+not have them.
+
+Differences:
+
+- The fonts are Inter, and the icons and logo are the port's own
+  drawings. Clicking the logo opens https://outobugi.com, as the
+  original does.
+- The original draws with Skia. The port uses NanoVG, which draws
+  two-stop gradients only. `Clamp/ClampUIDraw.cpp` draws each pair of
+  stops as its own band.
+- `Settings.ini` is in
+  `~/Library/Application Support/clamp-mac/Clamp/`.
 
 The plugin name and IDs are also different, on purpose.

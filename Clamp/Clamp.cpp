@@ -1,6 +1,11 @@
 #include "Clamp.h"
 #include "IPlug_include_in_plug_src.h"
 
+#if IPLUG_EDITOR
+  #include "ClampSettings.h"
+  #include "ClampUI.h"
+#endif
+
 Clamp::Clamp(const InstanceInfo& info)
 : iplug::Plugin(info, MakeConfig(kNumParams, kNumPresets))
 {
@@ -15,14 +20,36 @@ Clamp::Clamp(const InstanceInfo& info)
 
 #if IPLUG_EDITOR
   mMakeGraphicsFunc = [&]() {
-    return MakeGraphics(*this, PLUG_WIDTH, PLUG_HEIGHT, PLUG_FPS, GetScaleForScreen(PLUG_WIDTH, PLUG_HEIGHT));
+    // Like the original, open at scale 1. OnUIOpen applies the scale from Settings.ini.
+    return MakeGraphics(*this, PLUG_WIDTH, PLUG_HEIGHT, PLUG_FPS, 1.f);
   };
 
   mLayoutFunc = [&](IGraphics* pGraphics) {
-    AttachClampUI(pGraphics, kCtrlTagDisplay);
+    AttachClampUI(pGraphics);
   };
 #endif
 }
+
+#if IPLUG_EDITOR
+void Clamp::OnUIOpen()
+{
+  Plugin::OnUIOpen();
+
+  // Like the original (0x180549230): read Settings.ini, then apply the scale, the accent colour and tooltips.
+  ClampSettings settings;
+  ReadClampSettings(settings);
+  ApplyClampSettings(GetUI(), settings);
+}
+
+void Clamp::OnUIClose()
+{
+  // Like the original (0x180549150): Settings.ini is written only when the editor closes.
+  if (GetUI())
+    WriteClampSettings(CollectClampSettings(GetUI()));
+
+  Plugin::OnUIClose();
+}
+#endif
 
 #if IPLUG_DSP
 void Clamp::ProcessBlock(sample** inputs, sample** outputs, int nFrames)
@@ -32,12 +59,8 @@ void Clamp::ProcessBlock(sample** inputs, sample** outputs, int nFrames)
   sample* ins[2] = {inputs[0], inputs[1]};
   sample* outs[2] = {outputs[0], outputs[1]};
 
-  // The display shows levels at the clipper: after IN gain and before OUT gain.
-  const bool bypassed = GetParam(kBypass)->Bool();
-  mDisplaySender.ProcessInput(ins, nFrames, bypassed ? 1. : DBToAmp(GetParam(kInputGain)->Value()));
-
   ClampDSP::Params p;
-  p.bypass = bypassed;
+  p.bypass = GetParam(kBypass)->Bool();
   p.oversampling = GetParam(kOversampling)->Int();
   p.inDB = GetParam(kInputGain)->Value();
   p.outDB = GetParam(kOutputGain)->Value();
@@ -45,15 +68,18 @@ void Clamp::ProcessBlock(sample** inputs, sample** outputs, int nFrames)
   p.shape = GetParam(kShape)->Value();
   p.type = GetParam(kType)->Int();
   p.mode = GetParam(kMode)->Int();
-  mDSP.Process(ins, outs, nFrames, p);
 
-  mDisplaySender.ProcessOutput(outs, nFrames, bypassed ? 1. : DBToAmp(-GetParam(kOutputGain)->Value()), kCtrlTagDisplay);
+  // The DSP meters each oversampled sample, as the original does. Bypass sends nothing, so the display stops.
+  auto sendMeter = [this](float post, float pre) {
+    mDisplaySender.PushData({kCtrlTagDisplay, {post, pre}});
+  };
+  mDSP.Process(ins, outs, nFrames, p, sendMeter);
 }
 
 void Clamp::OnReset()
 {
   mDSP.SetBlockSize(GetBlockSize());
-  mDisplaySender.Reset(GetSampleRate());
+  mDSP.SetSampleRate(GetSampleRate());
 }
 
 void Clamp::OnParamChange(int paramIdx)

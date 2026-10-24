@@ -1,88 +1,355 @@
 #include "ClampUI.h"
 
 #include "Clamp.h"
+#include "ClampControls.h"
+#include "ClampSettings.h"
+#include "IControls.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
-#include <cstdio>
+#include <string>
 
-void ClampDisplaySender::Reset(double sampleRate)
-{
-  mWindowSize = std::max(1, static_cast<int>(sampleRate * kDisplayPointSeconds));
-  mNumInputPeaks = 0;
-  mCount = 0;
-  mInputPeak = 0.f;
-  mOutputPeak = 0.f;
-}
+using namespace clampui;
 
-void ClampDisplaySender::ProcessInput(sample** inputs, int nFrames, double gain)
-{
-  int count = mCount;
-  float peak = mInputPeak;
-  mNumInputPeaks = 0;
-
-  for (int s = 0; s < nFrames; s++)
-  {
-    const double v = std::max(std::abs(inputs[0][s]), std::abs(inputs[1][s])) * gain;
-    peak = std::max(peak, static_cast<float>(v));
-
-    if (++count == mWindowSize)
-    {
-      if (mNumInputPeaks < kMaxPointsPerBlock)
-        mInputPeaks[mNumInputPeaks++] = peak;
-      peak = 0.f;
-      count = 0;
-    }
-  }
-
-  mInputPeak = peak;
-}
-
-void ClampDisplaySender::ProcessOutput(sample** outputs, int nFrames, double gain, int ctrlTag)
-{
-  int point = 0;
-
-  for (int s = 0; s < nFrames; s++)
-  {
-    const double v = std::max(std::abs(outputs[0][s]), std::abs(outputs[1][s])) * gain;
-    mOutputPeak = std::max(mOutputPeak, static_cast<float>(v));
-
-    if (++mCount == mWindowSize)
-    {
-      if (point < mNumInputPeaks)
-        PushData({ctrlTag, {mInputPeaks[point], mOutputPeak}});
-      point++;
-      mOutputPeak = 0.f;
-      mCount = 0;
-    }
-  }
-}
-
-#if IPLUG_EDITOR
 namespace
 {
-const char* kFontRegular = "Inter-Regular";
-const char* kFontSemiBold = "Inter-SemiBold";
-const char* kFontBold = "Inter-Bold";
+constexpr const char* kAuthorURL = "https://outobugi.com";
 
-const IColor kBackground(255, 7, 7, 7);
-const IColor kAccent(255, 205, 108, 104);
-const IColor kAccentBright(255, 236, 150, 145);
-const IColor kTextBright(255, 182, 182, 182);
-const IColor kTextLabel(255, 176, 176, 176);
-const IColor kTextMid(255, 128, 128, 128);
-const IColor kTextDim(255, 76, 76, 76);
-const IColor kLogo(255, 205, 205, 205);
+#pragma mark - Panels
 
-/** Card corner radius. */
-constexpr float kCardRadius = 5.f;
-/** Distance from the top of the level display to its 0 dB line. */
-constexpr float kDisplayZeroOffset = 23.6f;
-/** Vertical scale of the level display: one grid step of 6 dB is 25 px. */
-constexpr float kDisplayPixelsPerDB = 25.f / 6.f;
-/** Width and height of the ceiling tag in the level display. */
-constexpr float kTagWidth = 46.f;
-constexpr float kTagHeight = 16.f;
+/** The editor background. Like IPanelControl, but it ignores the disabled blend, so that bypass leaves no trails. */
+class BackgroundPanel final : public IControl
+{
+public:
+  BackgroundPanel(const IRECT& bounds, const IColor& color)
+  : IControl(bounds)
+  , mColor(color)
+  {
+    mIgnoreMouse = true;
+  }
+
+  void Draw(IGraphics& g) override { g.FillRect(mColor, mRECT); }
+
+private:
+  IColor mColor;
+};
+
+/** Panel base (BasePanel with UIBase). It ignores the mouse and the disabled blend. */
+class BasePanel : public IControl
+{
+public:
+  /** cornerMode: 0 all corners round, 1 top, 2 bottom, 3 left, 4 right, else square. */
+  BasePanel(const IRECT& bounds, const IColor& color, int cornerMode)
+  : IControl(bounds)
+  , mColor(color)
+  , mCornerMode(cornerMode)
+  {
+    mIgnoreMouse = true;
+  }
+
+protected:
+  /** The panel rect is padded by 1.5. A square edge gets that back, so neighbouring panels meet. */
+  static constexpr float kInset = 1.5f;
+
+  /** UIBase::MakePath (0x18052fd30) with extend 0. It also clips to the path bounds. */
+  void MakePath(IGraphics& g, const IRECT& r, float radius) const
+  {
+    switch (mCornerMode)
+    {
+      case 0:
+        g.PathRoundRect(r, radius);
+        break;
+      case 1:
+        g.PathRoundRect(PathBounds(r), radius, radius, 0.f, 0.f);
+        g.PathClipRegion(PathBounds(r));
+        break;
+      case 2:
+        g.PathRoundRect(PathBounds(r), 0.f, 0.f, radius, radius);
+        g.PathClipRegion(PathBounds(r));
+        break;
+      case 3:
+        g.PathRoundRect(PathBounds(r), radius, 0.f, radius, 0.f);
+        g.PathClipRegion(PathBounds(r));
+        break;
+      case 4:
+        g.PathRoundRect(PathBounds(r), 0.f, radius, 0.f, radius);
+        g.PathClipRegion(PathBounds(r));
+        break;
+      default:
+        g.PathMoveTo(r.L - kInset, r.T);
+        g.PathLineTo(r.R + kInset, r.T);
+        g.PathLineTo(r.R + kInset, r.B);
+        g.PathLineTo(r.L - kInset, r.B);
+        g.PathClose();
+        break;
+    }
+  }
+
+  /** The same shape as MakePath, as a polygon. */
+  Outline MakePolygon(const IRECT& r, float radius) const
+  {
+    switch (mCornerMode)
+    {
+      case 0: return RoundRectPolygon(r, radius, radius, radius, radius);
+      case 1: return RoundRectPolygon(PathBounds(r), radius, radius, 0.f, 0.f);
+      case 2: return RoundRectPolygon(PathBounds(r), 0.f, 0.f, radius, radius);
+      case 3: return RoundRectPolygon(PathBounds(r), radius, 0.f, radius, 0.f);
+      case 4: return RoundRectPolygon(PathBounds(r), 0.f, radius, 0.f, radius);
+      default: return RoundRectPolygon(IRECT(r.L - kInset, r.T, r.R + kInset, r.B), 0.f, 0.f, 0.f, 0.f);
+    }
+  }
+
+  IColor mColor;
+  int mCornerMode;
+
+private:
+  IRECT PathBounds(const IRECT& r) const
+  {
+    switch (mCornerMode)
+    {
+      case 1: return IRECT(r.L, r.T, r.R, r.B + kInset);
+      case 2: return IRECT(r.L, r.T - kInset, r.R, r.B);
+      case 3: return IRECT(r.L, r.T, r.R + kInset, r.B);
+      case 4: return IRECT(r.L - kInset, r.T, r.R, r.B);
+      default: return r;
+    }
+  }
+};
+
+/** Dark glass panel (GlassPanel): a solid fill, lighter edges, and a faint tilted sheen. */
+class GlassPanel final : public BasePanel
+{
+public:
+  GlassPanel(const IRECT& bounds, const IColor& color, int cornerMode)
+  : BasePanel(bounds, color, cornerMode)
+  {
+  }
+
+  void Draw(IGraphics& g) override
+  {
+    const IRECT r = mRECT.GetPadded(-kInset);
+    const float h = r.H();
+    const IColor clear = WithAlpha(mColor, 0);
+
+    MakePath(g, r, 5.f);
+    g.PathFill(IPattern(mColor));
+
+    MakePath(g, r, 5.f);
+    if (mCornerMode == 2)
+      PathFillLinear(g, IPattern::CreateLinearGradient(r, EDirection::Vertical, {{IColor(51, 0, 0, 0), 0.f}, {clear, 15.f / h}, {clear, 1.f - 5.f / h}, {AddColor(mColor, 12), 1.f}}));
+    else if (mCornerMode == 1)
+      PathFillLinear(g, IPattern::CreateLinearGradient(r, EDirection::Vertical, {{AddColor(mColor, 38), 0.f}, {clear, 5.f / h}, {clear, 1.f}}));
+    else
+      PathFillLinear(g, IPattern::CreateLinearGradient(r, EDirection::Vertical, {{AddColor(mColor, 38), 0.f}, {clear, 5.f / h}, {clear, 1.f - 5.f / h}, {AddColor(mColor, 12), 1.f}}));
+
+    DrawSheen(g, r);
+  }
+
+private:
+  /** The sheen gradient is rotated by 6 degrees: white 10 to 5 over its first half, then a hard edge.
+   * NanoVG cannot clip a rotated band, so the lit part is cut out of the panel shape as a polygon. */
+  void DrawSheen(IGraphics& g, const IRECT& r)
+  {
+    IPattern pattern = IPattern::CreateLinearGradient(r, EDirection::Vertical);
+    pattern.mTransform.Rotate(6.f).Translate(-r.H() * 0.5f, 0.f);
+
+    IMatrix inverse = IMatrix(pattern.mTransform).Invert();
+    double sx, sy, ex, ey;
+    inverse.TransformPoint(sx, sy, 0., 0.);
+    inverse.TransformPoint(ex, ey, 0., 1.);
+    const float dx = static_cast<float>(ex - sx);
+    const float dy = static_cast<float>(ey - sy);
+
+    // The original fades from 5 to 0 between 0.49 and 0.5. Cut halfway, where the anti-aliased edge does the fade.
+    const Vertex edge {static_cast<float>(sx) + 0.495f * dx, static_cast<float>(sy) + 0.495f * dy};
+    PathPolygon(g, ClipHalfPlane(MakePolygon(r, 5.f), edge, {dx, dy}));
+    g.PathFill(IPattern::CreateLinearGradient(static_cast<float>(sx), static_cast<float>(sy), static_cast<float>(sx) + 0.49f * dx, static_cast<float>(sy) + 0.49f * dy,
+                                              {{IColor(10, 255, 255, 255), 0.f}, {IColor(5, 255, 255, 255), 1.f}}));
+  }
+};
+
+/** Lit metal panel (FramePanel) with indented dots in the corners. */
+class FramePanel final : public BasePanel
+{
+public:
+  /** gradientRect places the radial light. dotsMode: 1 bottom corners, 2 top corners, 4 all four. */
+  FramePanel(const IRECT& bounds, const IColor& color, int cornerMode, const IRECT& gradientRect, int dotsMode)
+  : BasePanel(bounds, color, cornerMode)
+  , mGradientRect(gradientRect)
+  , mDotsMode(dotsMode)
+  {
+  }
+
+  void Draw(IGraphics& g) override
+  {
+    const IRECT r = mRECT.GetPadded(-kInset);
+    const float h = r.H();
+
+    // Radial light from above the top centre.
+    const Outline shape = MakePolygon(r, 5.f);
+    MakePath(g, r, 5.f);
+    PathFillRadial(g, mGradientRect.MW(), mGradientRect.MH() - mGradientRect.H() / 1.666f, mGradientRect.W() / 1.5f,
+                   {{AddColor(mColor, 12), 0.f}, {mColor, 0.33f}, {AddColor(mColor, -12), 1.f}}, &shape);
+
+    // Bevel: a 3 px highlight at the top and a 3 px shade at the bottom.
+    const IColor light = mCornerMode == 2 ? mColor : AddColor(mColor, 25);
+    const IColor dark = (mCornerMode == 1 || mCornerMode == 2) ? AddColor(mColor, -12) : AddColor(mColor, -24);
+    MakePath(g, r, 5.f);
+    PathFillLinear(g, IPattern::CreateLinearGradient(r, EDirection::Vertical, {{light, 0.f}, {WithAlpha(light, 0), 3.f / h}, {WithAlpha(dark, 0), 1.f - 3.f / h}, {dark, 1.f}}));
+
+    DrawDots(g, r);
+  }
+
+private:
+  /** One indent (IndentDot): a dark hole with a light lower rim. */
+  static void DrawDot(IGraphics& g, float x, float y)
+  {
+    constexpr float kRadius = 1.8f;
+    const IRECT r(x - kRadius / 2.f, y - kRadius / 2.f, x + kRadius / 2.f, y + kRadius / 2.f);
+    g.PathCircle(x, y, kRadius);
+    PathFillLinear(g, IPattern::CreateLinearGradient(r, EDirection::Vertical, {{IColor(204, 0, 0, 0), 0.f}, {IColor(127, 0, 0, 0), 1.f}}), true);
+    // The original passes the panel fields 8 and 0.1 as the IBlend of this
+    // stroke (0x180530c0c), so the rim is added at 10 %.
+    PathStrokeAdd(g, IPattern::CreateLinearGradient(r, EDirection::Vertical, {{kColorTransparent, 0.f}, {IColor(255, 255, 255, 255), 1.f}}), 1.f, IStrokeOptions(), 0.1f);
+  }
+
+  /** A right triangle of 6 dots (0x180531370). Negative w or h mirrors it. */
+  static void DrawCluster(IGraphics& g, float y0, float x0, float w, float h)
+  {
+    const float m = std::min(h, 0.f);
+    DrawDot(g, x0, y0 - m);
+    DrawDot(g, x0, y0 + 0.33f * h - m);
+    DrawDot(g, x0, y0 + 0.66f * h - m);
+    DrawDot(g, x0 + 0.33f * w, y0 + 0.33f * h - m);
+    DrawDot(g, x0 + 0.33f * w, y0 + 0.66f * h - m);
+    DrawDot(g, x0 + 0.66f * w, y0 + 0.66f * h - m);
+  }
+
+  void DrawDots(IGraphics& g, const IRECT& r)
+  {
+    if (mDotsMode == 1 || mDotsMode == 4)
+    {
+      DrawCluster(g, r.B - 30.f, r.L + 15.f, 25.f, 25.f);
+      DrawCluster(g, r.B - 30.f, r.R - 15.f, -25.f, 25.f);
+    }
+    if (mDotsMode == 2 || mDotsMode == 4)
+    {
+      DrawCluster(g, r.T + 5.f, r.L + 15.f, 25.f, -25.f);
+      DrawCluster(g, r.T + 5.f, r.R - 15.f, -25.f, -25.f);
+    }
+  }
+
+  IRECT mGradientRect;
+  int mDotsMode;
+};
+
+#pragma mark - Header and footer
+
+/** Header (IContainerBase in the original). It ignores the mouse and draws the about overlay. */
+class Header final : public IControl
+{
+public:
+  explicit Header(const IRECT& bounds)
+  : IControl(bounds)
+  {
+    mIgnoreMouse = true;
+  }
+
+  void Draw(IGraphics& g) override
+  {
+    if (!mShowAbout)
+      return;
+
+    g.FillRect(IColor(191, 7, 7, 7), IRECT(mRECT.L, mRECT.T + 36.f, mRECT.R, mRECT.B));
+
+    // The original's rows: the title block, then three blocks of (320 - 50 - 116) / 3.
+    const IRECT title(mRECT.L + 50.f, mRECT.T + 86.f, mRECT.R - 50.f, mRECT.T + 116.f);
+    const float step = (mRECT.B - 50.f - title.B) / 3.f;
+    const IText body = AboutBodyText();
+    auto row = [&](float top, float bottom) { return IRECT(title.L, top, title.R, bottom); };
+
+    g.DrawText(AboutTitleText().WithVAlign(EVAlign::Top), PLUG_NAME, title);
+    g.DrawText(body.WithVAlign(EVAlign::Bottom), PLUG_VERSION_STR, title);
+    g.DrawText(body, PLUG_COPYRIGHT_STR, row(title.B, title.B + step));
+    g.DrawText(body, "Made with iPlug2 Framework", row(title.B + step, title.B + 2.f * step));
+    g.DrawText(body.WithVAlign(EVAlign::Bottom), "VST is a registered trademark of", row(title.B + 2.f * step, title.B + 2.5f * step));
+    g.DrawText(body.WithVAlign(EVAlign::Top), "Steinberg Media Technologies GmbH", row(title.B + 2.5f * step, title.B + 3.f * step));
+  }
+
+  /** The header buttons never grey out, and neither does the header. */
+  void SetDisabled(bool disable) override {}
+
+  void ToggleAbout()
+  {
+    mShowAbout = !mShowAbout;
+    SetDirty(false);
+  }
+
+  ColorMenu* mColorMenu = nullptr;
+
+private:
+  bool mShowAbout = false;
+};
+
+/** Footer: the Tooltips switch and the version. It owns the tooltip strip. */
+class Footer final : public IControl
+{
+public:
+  explicit Footer(const IRECT& bounds)
+  : IControl(bounds)
+  {
+    mText = FooterText();
+    mDblAsSingleClick = true;
+  }
+
+  void OnResize() override
+  {
+    mRECT = IRECT(mRECT.L, mRECT.B - 21.5f, mRECT.R, mRECT.B);
+    mTargetRECT = mRECT;
+    const float x0 = mRECT.L + 5.f;
+    const float half = ((mRECT.R - 5.f) - x0) / 2.f;
+    mCircleRect = IRECT(x0, mRECT.T, x0 + 8.f, mRECT.B);
+    mLabelRect = IRECT(x0 + 12.f, mRECT.T, x0 + half, mRECT.B);
+    mVersionRect = IRECT(x0 + half, mRECT.T, mRECT.R - 5.f, mRECT.B);
+  }
+
+  void OnAttached() override
+  {
+    mTooltipDisplay = new TooltipDisplay(mText.WithAlign(EAlign::Center), mRECT);
+    GetUI()->AttachBubbleControl(mTooltipDisplay);
+  }
+
+  void Draw(IGraphics& g) override
+  {
+    g.DrawText(mText.WithAlign(EAlign::Far), PLUG_NAME " " PLUG_VERSION_STR, mVersionRect);
+    g.DrawText(mText.WithAlign(EAlign::Near), "Tooltips", mLabelRect);
+    const float r = std::min(mCircleRect.W(), mCircleRect.H()) / 2.f;
+    g.DrawCircle(kColorFooterText, mCircleRect.MW(), mCircleRect.MH(), r, nullptr, 1.f);
+    if (mTooltipDisplay && !mTooltipDisplay->IsDisabled())
+      g.FillCircle(kColorFooterText, mCircleRect.MW(), mCircleRect.MH(), 2.f);
+  }
+
+  void OnMouseDown(float x, float y, const IMouseMod& mod) override
+  {
+    if (mTooltipDisplay && (mCircleRect.Contains(x, y) || mLabelRect.Contains(x, y)))
+      mTooltipDisplay->SetDisabled(!mTooltipDisplay->IsDisabled());
+    SetDirty(true);
+  }
+
+  TooltipDisplay* GetTooltipDisplay() const { return mTooltipDisplay; }
+
+private:
+  TooltipDisplay* mTooltipDisplay = nullptr;
+  IRECT mCircleRect;
+  IRECT mLabelRect;
+  IRECT mVersionRect;
+};
+
+#pragma mark - Icons
+
+// The port's own icons, drawn as paths. They follow the size, place and grey
+// of the original artwork, not its shapes.
 
 IStrokeOptions RoundStroke()
 {
@@ -92,696 +359,176 @@ IStrokeOptions RoundStroke()
   return options;
 }
 
-IColor Grey(int v, int alpha = 255)
+/** A neutral mark: a wave held flat between two jaws. Grey 208, like the original logo. */
+void DrawLogoIcon(IGraphics& g, const IRECT& r)
 {
-  return IColor(alpha, v, v, v);
+  const IColor color(255, 208, 208, 208);
+  const float cx = r.MW();
+  const float cy = r.MH();
+  constexpr float kThickness = 2.f;
+
+  g.PathMoveTo(cx - 8.5f, cy - 7.5f);
+  g.PathLineTo(cx + 8.5f, cy - 7.5f);
+  g.PathMoveTo(cx - 8.5f, cy + 7.5f);
+  g.PathLineTo(cx + 8.5f, cy + 7.5f);
+  g.PathStroke(IPattern(color), kThickness, RoundStroke());
+
+  constexpr int kSteps = 32;
+  for (int i = 0; i <= kSteps; i++)
+  {
+    const float t = static_cast<float>(i) / kSteps;
+    const float y = std::clamp(-std::sin(t * 2.f * static_cast<float>(PI)) * 6.f, -3.5f, 3.5f);
+    if (i == 0)
+      g.PathMoveTo(cx - 7.f, cy + y);
+    else
+      g.PathLineTo(cx - 7.f + 14.f * t, cy + y);
+  }
+  g.PathStroke(IPattern(color), kThickness, RoundStroke());
 }
 
-/** Draws a "<" or ">" chevron centred on (x, y). */
-void DrawChevron(IGraphics& g, float x, float y, bool pointsLeft, const IColor& color)
+/** Power symbol: a ring open at the top with a bar through the gap. Grey 185. */
+void DrawPowerIcon(IGraphics& g, const IRECT& r)
 {
-  const float dx = pointsLeft ? 2.3f : -2.3f;
-  g.PathMoveTo(x + dx, y - 4.3f);
-  g.PathLineTo(x - dx, y);
-  g.PathLineTo(x + dx, y + 4.3f);
-  g.PathStroke(color, 1.3f, RoundStroke());
+  const IColor color(255, 185, 185, 185);
+  const float cx = r.MW();
+  const float cy = r.MH();
+  constexpr float kThickness = 2.3f;
+
+  g.PathArc(cx, cy + 0.25f, 6.35f, 35.f, 325.f);
+  g.PathStroke(IPattern(color), kThickness, RoundStroke());
+  g.PathMoveTo(cx, cy - 6.6f);
+  g.PathLineTo(cx, cy - 0.3f);
+  g.PathStroke(IPattern(color), kThickness, RoundStroke());
 }
 
-/** Draws the triangle of dots in one corner of the controls card. (x, y) is the corner dot. */
-void DrawCornerDots(IGraphics& g, float x, float y, float dirX, float dirY)
+/** Question mark. Grey 186. */
+void DrawInfoIcon(IGraphics& g, const IRECT& r)
 {
-  constexpr float spacing = 8.4f;
-  for (int j = 0; j < 3; j++)
-    for (int i = 0; i + j < 3; i++)
-      g.FillCircle(Grey(15), x + dirX * spacing * i, y + dirY * spacing * j, 1.1f);
+  const IColor color(255, 186, 186, 186);
+  const float cx = r.MW();
+  const float cy = r.MH();
+
+  g.PathArc(cx, cy - 2.8f, 3.55f, -75.f, 125.f);
+  g.PathLineTo(cx, cy + 1.1f);
+  g.PathLineTo(cx, cy + 2.4f);
+  g.PathStroke(IPattern(color), 2.5f, RoundStroke());
+  g.FillCircle(color, cx, cy + 6.1f, 1.6f);
 }
 
-/** Static artwork: background, header title and mark, cards, and fixed labels. */
-class ClampBackground final : public IControl
+#pragma mark - Bypass
+
+/** The power button's routine (0x180560e10): grey out every control bound to a parameter, and controls 0 to 2. */
+void ApplyBypass(IGraphics* pGraphics, bool bypassed)
 {
-public:
-  ClampBackground(const IRECT& bounds, const IRECT& displayCard, const IRECT& controlsCard, float stripTop)
-  : IControl(bounds)
-  , mDisplayCard(displayCard)
-  , mControlsCard(controlsCard)
-  , mStripTop(stripTop)
-  {
-    mIgnoreMouse = true;
-  }
-
-  void Draw(IGraphics& g) override
-  {
-    g.FillRect(kBackground, mRECT);
-    DrawMark(g, IRECT(10.f, 12.f, 29.f, 29.f));
-    g.DrawText(IText(17.5f, kTextBright, kFontBold, EAlign::Near), "CLAMP", IRECT(41.f, 10.f, 160.f, 31.f));
-
-    // Level display card: flat, darker towards the bottom.
-    const IRECT& d = mDisplayCard;
-    g.FillRoundRect(Grey(26), d, kCardRadius);
-    g.PathRoundRect(IRECT(d.L, d.B - 80.f, d.R, d.B), 0.f, 0.f, kCardRadius, kCardRadius);
-    g.PathFill(IPattern::CreateLinearGradient(d.MW(), d.B - 80.f, d.MW(), d.B - 15.f, {{Grey(17, 0), 0.f}, {Grey(17), 1.f}}));
-    DrawTopEdge(g, d);
-
-    // Controls card: lit from the top left, with a dark strip at the bottom.
-    const IRECT& c = mControlsCard;
-    g.PathRoundRect(IRECT(c.L, c.T, c.R, mStripTop), kCardRadius, kCardRadius, 0.f, 0.f);
-    g.PathFill(IPattern::CreateLinearGradient(c.L + 65.f, c.T, c.L + 165.f, mStripTop, {{Grey(57), 0.f}, {Grey(37), 1.f}}));
-    g.FillRoundRect(Grey(16), IRECT(c.L, mStripTop, c.R, c.B), 0.f, 0.f, kCardRadius, kCardRadius);
-    DrawTopEdge(g, c);
-
-    DrawCornerDots(g, c.L + 14.6f, c.T + 13.2f, 1.f, 1.f);
-    DrawCornerDots(g, c.R - 14.7f, c.T + 13.2f, -1.f, 1.f);
-    DrawCornerDots(g, c.L + 14.6f, c.T + 207.8f, 1.f, -1.f);
-    DrawCornerDots(g, c.R - 14.7f, c.T + 207.8f, -1.f, -1.f);
-
-    g.DrawText(IText(10.5f, kTextMid, kFontSemiBold), "CEILING", IRECT(c.L, 222.f, c.R, 239.f));
-    g.DrawText(IText(10.5f, kTextMid, kFontRegular, EAlign::Far), PLUG_NAME " " PLUG_VERSION_STR, IRECT(200.f, 301.f, 394.f, 318.f));
-  }
-
-private:
-  /** Draws the header mark: a sine wave held between two clamp jaws. */
-  static void DrawMark(IGraphics& g, const IRECT& r)
-  {
-    constexpr int kSteps = 32;
-    const float limit = r.H() * 0.27f;
-    for (int i = 0; i <= kSteps; i++)
-    {
-      const float t = static_cast<float>(i) / kSteps;
-      const float y = std::clamp(-static_cast<float>(std::sin(t * 2. * PI)) * r.H() * 0.5f, -limit, limit);
-      if (i == 0)
-        g.PathMoveTo(r.L + 1.f, r.MH() + y);
-      else
-        g.PathLineTo(r.L + 1.f + t * (r.W() - 2.f), r.MH() + y);
-    }
-    g.PathStroke(kLogo, 2.2f, RoundStroke());
-    g.PathLine(r.L, r.T + 0.8f, r.R, r.T + 0.8f);
-    g.PathLine(r.L, r.B - 0.8f, r.R, r.B - 0.8f);
-    g.PathStroke(kLogo, 1.6f, RoundStroke());
-  }
-
-  /** Draws a faint highlight along the top edge of a card. */
-  static void DrawTopEdge(IGraphics& g, const IRECT& r)
-  {
-    g.PathRoundRect(r.GetPadded(-0.5f), kCardRadius);
-    g.PathStroke(IPattern::CreateLinearGradient(r.MW(), r.T, r.MW(), r.T + 8.f, {{IColor(28, 255, 255, 255), 0.f}, {IColor(0, 255, 255, 255), 1.f}}), 1.f);
-  }
-
-  IRECT mDisplayCard;
-  IRECT mControlsCard;
-  float mStripTop;
-};
-
-/** Scrolling level history with a dB grid and a draggable ceiling tag. */
-class ClampLevelDisplay final : public IControl
-{
-public:
-  ClampLevelDisplay(const IRECT& bounds, int paramIdx)
-  : IControl(bounds, paramIdx)
-  {
-  }
-
-  void Draw(IGraphics& g) override
-  {
-    const float zeroY = DBToY(0.);
-    DrawHistory(g, mInput.data(), zeroY, Grey(255, 18), Grey(255, 4), Grey(255, 22));
-    DrawHistory(g, mOutput.data(), zeroY, Grey(255, 22), Grey(255, 0), Grey(120, 210));
-
-    for (int dB = 0; dB >= -42; dB -= 6)
-    {
-      char label[16];
-      std::snprintf(label, sizeof(label), "%d dB", dB);
-      const IColor color = Grey(static_cast<int>(127.f + 2.2f * dB));
-      const float y = DBToY(dB);
-      g.DrawText(IText(9.f, color, kFontSemiBold), label, IRECT(mRECT.L, y - 6.f, mRECT.R, y + 6.f));
-    }
-
-    const double ceilingDB = GetParam()->FromNormalized(GetValue());
-    const float y = DBToY(ceilingDB);
-    g.DrawHorizontalLine(kAccent.WithOpacity(0.3f), y, mRECT.L, mRECT.R);
-
-    const IRECT tag = GetTagRect();
-    g.FillRoundRect(IColor(255, 46, 31, 30), tag, 4.f);
-    g.DrawRoundRect(kAccent, tag.GetPadded(-0.75f), 3.5f, nullptr, 1.5f);
-    char value[16];
-    std::snprintf(value, sizeof(value), "%.1f dB", ceilingDB);
-    g.DrawText(IText(10.f, kAccent, kFontRegular), value, tag);
-  }
-
-  void OnMsgFromDelegate(int msgTag, int dataSize, const void* pData) override
-  {
-    if (mFrozen || msgTag != ISender<2, 256, float>::kUpdateMessage || dataSize != sizeof(ISenderData<2, float>))
-      return;
-
-    const auto* pPoint = static_cast<const ISenderData<2, float>*>(pData);
-    mInput[mWritePos] = pPoint->vals[0];
-    mOutput[mWritePos] = pPoint->vals[1];
-    mWritePos = (mWritePos + 1) % kNumPoints;
-    SetDirty(false);
-  }
-
-  void OnMouseDown(float x, float y, const IMouseMod& mod) override
-  {
-    mDragging = HitsCeiling(x, y);
-    mDragOffset = y - DBToY(GetParam()->FromNormalized(GetValue()));
-  }
-
-  void OnMouseDrag(float x, float y, float dX, float dY, const IMouseMod& mod) override
-  {
-    if (mDragging)
-      SetCeilingDB(YToDB(y - mDragOffset));
-  }
-
-  void OnMouseUp(float x, float y, const IMouseMod& mod) override
-  {
-    mDragging = false;
-  }
-
-  void OnMouseDblClick(float x, float y, const IMouseMod& mod) override
-  {
-    if (HitsCeiling(x, y))
-      SetValueToDefault();
-  }
-
-  void OnMouseWheel(float x, float y, const IMouseMod& mod, float d) override
-  {
-    SetCeilingDB(GetParam()->FromNormalized(GetValue()) + (d > 0.f ? 0.5 : -0.5));
-  }
-
-  void OnMouseOver(float x, float y, const IMouseMod& mod) override
-  {
-    GetUI()->SetMouseCursor(HitsCeiling(x, y) ? ECursor::SIZENS : ECursor::ARROW);
-    IControl::OnMouseOver(x, y, mod);
-  }
-
-  void OnMouseOut() override
-  {
-    GetUI()->SetMouseCursor(ECursor::ARROW);
-    IControl::OnMouseOut();
-  }
-
-  /** Stops or restarts the scrolling. */
-  void SetFrozen(bool frozen) { mFrozen = frozen; }
-  bool IsFrozen() const { return mFrozen; }
-
-private:
-  static constexpr int kNumPoints = 256;
-
-  float DBToY(double dB) const
-  {
-    return mRECT.T + kDisplayZeroOffset - static_cast<float>(dB) * kDisplayPixelsPerDB;
-  }
-
-  double YToDB(float y) const
-  {
-    return (mRECT.T + kDisplayZeroOffset - y) / kDisplayPixelsPerDB;
-  }
-
-  IRECT GetTagRect() const
-  {
-    const float y = DBToY(GetParam()->FromNormalized(GetValue()));
-    return IRECT(mRECT.MW() - kTagWidth / 2.f, y - kTagHeight / 2.f, mRECT.MW() + kTagWidth / 2.f, y + kTagHeight / 2.f);
-  }
-
-  bool HitsCeiling(float x, float y) const
-  {
-    return GetTagRect().Contains(x, y) || std::abs(y - GetTagRect().MH()) <= 4.f;
-  }
-
-  void SetCeilingDB(double dB)
-  {
-    SetValue(GetParam()->ConstrainNormalized(GetParam()->ToNormalized(dB)));
-    SetDirty(true);
-  }
-
-  /** Fills the area under one level history, newest point at the right edge, and strokes its outline. */
-  void DrawHistory(IGraphics& g, const float* pPoints, float zeroY, const IColor& fillTop, const IColor& fillBottom, const IColor& lineColor)
-  {
-    const int nPoints = std::min(kNumPoints, static_cast<int>(mRECT.W()) + 1);
-    auto pointY = [&](int k) {
-      const float amp = pPoints[(mWritePos - 1 - k + kNumPoints) % kNumPoints];
-      const float y = DBToY(AmpToDB(std::max(amp, 1e-6f)));
-      return std::clamp(y, mRECT.T, mRECT.B);
-    };
-
-    g.PathMoveTo(mRECT.R, mRECT.B);
-    for (int k = 0; k < nPoints; k++)
-      g.PathLineTo(mRECT.R - k, pointY(k));
-    g.PathLineTo(mRECT.R - (nPoints - 1), mRECT.B);
-    g.PathClose();
-    g.PathFill(IPattern::CreateLinearGradient(mRECT.MW(), zeroY, mRECT.MW(), mRECT.B, {{fillTop, 0.f}, {fillBottom, 1.f}}));
-
-    for (int k = 0; k < nPoints; k++)
-    {
-      if (k == 0)
-        g.PathMoveTo(mRECT.R, pointY(k));
-      else
-        g.PathLineTo(mRECT.R - k, pointY(k));
-    }
-    g.PathStroke(lineColor, 1.f, RoundStroke());
-  }
-
-  std::array<float, kNumPoints> mInput {};
-  std::array<float, kNumPoints> mOutput {};
-  int mWritePos = 0;
-  bool mFrozen = false;
-  bool mDragging = false;
-  float mDragOffset = 0.f;
-};
-
-/** Large CEILING knob with a red arc from the value to the top of the range. */
-class ClampCeilingKnob final : public IKnobControlBase
-{
-public:
-  ClampCeilingKnob(const IRECT& bounds, int paramIdx)
-  : IKnobControlBase(bounds, paramIdx, EDirection::Vertical, 2.)
-  {
-  }
-
-  void Draw(IGraphics& g) override
-  {
-    const float cx = mRECT.MW();
-    const float cy = mRECT.MH();
-    const float s = mRECT.W() / 132.f;
-    const float angle = -135.f + static_cast<float>(GetValue()) * 270.f;
-
-    // Soft shadow around the well.
-    g.PathCircle(cx, cy + 3.f * s, 70.f * s);
-    g.PathFill(IPattern::CreateRadialGradient(cx, cy + 3.f * s, 70.f * s, {{IColor(110, 0, 0, 0), 60.f / 70.f}, {IColor(0, 0, 0, 0), 1.f}}));
-
-    // Well with a lit top rim.
-    g.PathCircle(cx, cy, 63.5f * s);
-    g.PathFill(IPattern::CreateLinearGradient(cx, cy - 63.5f * s, cx, cy + 63.5f * s, {{Grey(68), 0.f}, {Grey(26), 1.f}}));
-    g.PathCircle(cx, cy, 62.3f * s);
-    g.PathFill(IPattern::CreateLinearGradient(cx, cy - 62.f * s, cx, cy + 62.f * s, {{Grey(40), 0.f}, {Grey(33), 1.f}}));
-
-    // Knob body, dark at the edge and at the bottom.
-    g.PathCircle(cx, cy, 56.5f * s);
-    g.PathFill(IPattern::CreateRadialGradient(cx, cy, 56.5f * s, {{Grey(47), 44.f / 56.5f}, {Grey(13), 1.f}}));
-    g.PathCircle(cx, cy, 56.5f * s);
-    g.PathFill(IPattern::CreateLinearGradient(cx, cy - 20.f * s, cx, cy + 56.f * s, {{IColor(0, 0, 0, 0), 0.f}, {IColor(150, 0, 0, 0), 1.f}}));
-
-    // Face with a thin lit rim.
-    g.PathCircle(cx, cy, 44.3f * s);
-    g.PathFill(IPattern::CreateLinearGradient(cx, cy - 44.f * s, cx, cy + 44.f * s, {{Grey(58), 0.f}, {Grey(38), 1.f}}));
-    g.PathCircle(cx, cy, 44.3f * s);
-    g.PathStroke(IPattern::CreateLinearGradient(cx, cy - 44.f * s, cx, cy + 20.f * s, {{Grey(96), 0.f}, {Grey(96, 0), 1.f}}), 1.f);
-
-    // Value arc with a glow.
-    if (angle < 134.5f)
-    {
-      const float r = 56.5f * s;
-      g.DrawArc(kAccent.WithOpacity(0.06f), cx, cy, r, angle, 135.f, nullptr, 10.f * s);
-      g.DrawArc(kAccent.WithOpacity(0.12f), cx, cy, r, angle, 135.f, nullptr, 6.f * s);
-      g.DrawArc(kAccent.WithOpacity(0.35f), cx, cy, r, angle, 135.f, nullptr, 3.5f * s);
-      g.PathArc(cx, cy, r, angle, 135.f);
-      g.PathStroke(kAccentBright, 2.f * s, RoundStroke());
-    }
-
-    g.PathRadialLine(cx, cy, angle, 31.f * s, 47.f * s);
-    g.PathStroke(Grey(112), 1.7f * s, RoundStroke());
-  }
-
-  void OnMouseDblClick(float x, float y, const IMouseMod& mod) override
-  {
-    SetValueToDefault();
-  }
-};
-
-/** Vertical gain fader. The red bar runs from 0 dB to the handle. */
-class ClampFader final : public IKnobControlBase
-{
-public:
-  ClampFader(const IRECT& bounds, int paramIdx)
-  : IKnobControlBase(bounds, paramIdx, EDirection::Vertical, 1.)
-  {
-  }
-
-  void Draw(IGraphics& g) override
-  {
-    const float cx = mRECT.MW();
-    const IRECT track(cx - 3.5f, mRECT.T, cx + 3.5f, mRECT.B);
-    g.FillRoundRect(Grey(11), track, 3.5f);
-    g.PathRoundRect(track.GetPadded(0.5f), 4.f);
-    g.PathStroke(IPattern::CreateLinearGradient(cx, mRECT.MH(), cx, mRECT.B, {{Grey(70, 0), 0.f}, {Grey(70), 1.f}}), 1.f);
-
-    const IRECT travel = GetKnobDragBounds();
-    const float handleY = travel.B - static_cast<float>(GetValue()) * travel.H();
-    const float zeroY = travel.B - static_cast<float>(GetParam()->ToNormalized(0.)) * travel.H();
-    if (handleY < zeroY - kHandleHalfHeight)
-      g.DrawLine(kAccentBright, cx, handleY + kHandleHalfHeight, cx, zeroY, nullptr, 1.5f);
-    else if (handleY > zeroY + kHandleHalfHeight)
-      g.DrawLine(kAccentBright, cx, zeroY, cx, handleY - kHandleHalfHeight, nullptr, 1.5f);
-
-    const IRECT handle(mRECT.L, handleY - kHandleHalfHeight, mRECT.R, handleY + kHandleHalfHeight);
-    g.DrawFastDropShadow(handle, handle.GetPadded(7.f), 2.f, 3.5f, 5.f);
-    g.PathRoundRect(handle, 3.5f);
-    g.PathFill(IPattern::CreateLinearGradient(cx, handle.T, cx, handle.B, {{Grey(64), 0.f}, {Grey(35), 1.f}}));
-    g.PathLine(cx - 8.5f, handleY, cx + 8.5f, handleY);
-    g.PathStroke(Grey(124), 1.6f, RoundStroke());
-  }
-
-  void OnMouseDblClick(float x, float y, const IMouseMod& mod) override
-  {
-    SetValueToDefault();
-  }
-
-protected:
-  /** The handle centre travels the track minus half a handle at each end, and follows the mouse 1:1. */
-  IRECT GetKnobDragBounds() override
-  {
-    return mRECT.GetVPadded(-kHandleHalfHeight);
-  }
-
-private:
-  static constexpr float kHandleHalfHeight = 6.f;
-};
-
-/** SHAPE strip: soft and hard curve icons, the label, and the value, which changes with vertical drag. */
-class ClampShapeControl final : public IKnobControlBase
-{
-public:
-  ClampShapeControl(const IRECT& bounds, int paramIdx)
-  : IKnobControlBase(bounds, paramIdx, EDirection::Vertical, 1.)
-  {
-  }
-
-  void Draw(IGraphics& g) override
-  {
-    const float v = static_cast<float>(GetValue());
-    const float x = mRECT.L;
-    const float y = mRECT.MH();
-
-    g.PathMoveTo(x + 4.5f, y + 3.f);
-    g.PathQuadraticBezierTo(x + 6.5f, y - 3.7f, x + 17.4f, y - 4.f);
-    g.PathStroke(IColor::LinearInterpolateBetween(kAccent, kTextDim, v), 1.6f, RoundStroke());
-
-    g.PathMoveTo(x + 120.7f, y + 3.3f);
-    g.PathLineTo(x + 127.4f, y - 3.7f);
-    g.PathLineTo(x + 133.2f, y - 3.7f);
-    g.PathStroke(IColor::LinearInterpolateBetween(kTextDim, kAccent, v), 1.4f, RoundStroke());
-
-    g.DrawText(IText(8.5f, kTextLabel, kFontBold, EAlign::Near), "SHAPE", IRECT(x + 33.7f, y - 7.f, x + 66.f, y + 7.f));
-    char value[16];
-    std::snprintf(value, sizeof(value), "%.2f", GetParam()->FromNormalized(GetValue()));
-    g.DrawText(IText(10.5f, kAccent, kFontRegular, EAlign::Near), value, IRECT(x + 66.3f, y - 7.f, x + 95.f, y + 7.f));
-
-    const float cx = x + 101.4f;
-    g.PathMoveTo(cx - 3.3f, y - 1.5f);
-    g.PathLineTo(cx, y - 4.4f);
-    g.PathLineTo(cx + 3.3f, y - 1.5f);
-    g.PathMoveTo(cx - 3.3f, y + 1.9f);
-    g.PathLineTo(cx, y + 4.8f);
-    g.PathLineTo(cx + 3.3f, y + 1.9f);
-    g.PathStroke(kTextDim, 1.2f, RoundStroke());
-  }
-
-  void OnMouseDown(float x, float y, const IMouseMod& mod) override
-  {
-    if (x < mRECT.L + 24.f)
-      SetShape(0.);
-    else if (x > mRECT.L + 114.f)
-      SetShape(1.);
-    else
-      IKnobControlBase::OnMouseDown(x, y, mod);
-  }
-
-  void OnMouseDblClick(float x, float y, const IMouseMod& mod) override
-  {
-    if (x >= mRECT.L + 24.f && x <= mRECT.L + 114.f)
-      SetValueToDefault();
-  }
-
-protected:
-  /** A 150 px drag covers the full range. */
-  IRECT GetKnobDragBounds() override
-  {
-    return mRECT.GetCentredInside(mRECT.W(), 150.f);
-  }
-
-private:
-  void SetShape(double value)
-  {
-    SetValue(value);
-    SetDirty(true);
-  }
-};
-
-/** Enum selector drawn as text. With arrows, it shows "<" and ">" (or a dot at either end of the list). */
-class ClampEnumControl final : public IControl
-{
-public:
-  ClampEnumControl(const IRECT& bounds, int paramIdx, const IText& text, bool showArrows)
-  : IControl(bounds, paramIdx)
-  , mShowArrows(showArrows)
-  {
-    mText = text;
-    mDblAsSingleClick = true;
-  }
-
-  void Draw(IGraphics& g) override
-  {
-    WDL_String display;
-    GetParam()->GetDisplay(display);
-    g.DrawText(mText, display.Get(), mRECT);
-
-    if (!mShowArrows)
-      return;
-
-    const int index = GetParam()->Int();
-    const float y = mRECT.MH();
-    if (index > 0)
-      DrawChevron(g, mRECT.L + 6.f, y, true, kTextDim);
-    else
-      g.FillCircle(kTextDim, mRECT.L + 6.f, y, 1.f);
-
-    if (index < NumOptions() - 1)
-      DrawChevron(g, mRECT.R - 6.f, y, false, kTextDim);
-    else
-      g.FillCircle(kTextDim, mRECT.R - 6.f, y, 1.f);
-  }
-
-  void OnMouseDown(float x, float y, const IMouseMod& mod) override
-  {
-    if (mod.R)
-      PromptUserInput(mRECT);
-    else if (mShowArrows && x < mRECT.L + mRECT.W() * 0.25f)
-      Step(-1, false);
-    else if (mShowArrows && x > mRECT.R - mRECT.W() * 0.25f)
-      Step(1, false);
-    else
-      Step(1, true);
-  }
-
-  void OnMouseWheel(float x, float y, const IMouseMod& mod, float d) override
-  {
-    Step(d > 0.f ? 1 : -1, false);
-  }
-
-private:
-  int NumOptions() const { return GetParam()->NDisplayTexts(); }
-
-  void Step(int delta, bool wrap)
-  {
-    const int n = NumOptions();
-    int index = GetParam()->Int() + delta;
-    index = wrap ? (index + n) % n : std::clamp(index, 0, n - 1);
-    SetValue(GetParam()->ToNormalized(index));
-    SetDirty(true);
-  }
-
-  bool mShowArrows;
-};
-
-/** Power icon. It is lit while the plugin is active, and dim while BYPASS is on. */
-class ClampBypassButton final : public IControl
-{
-public:
-  ClampBypassButton(const IRECT& bounds, int paramIdx)
-  : IControl(bounds, paramIdx)
-  {
-    mDblAsSingleClick = true;
-  }
-
-  void Draw(IGraphics& g) override
-  {
-    const IColor color = GetValue() > 0.5 ? kTextDim : kTextBright;
-    const float cx = mRECT.MW();
-    const float cy = mRECT.MH() + 0.8f;
-    g.PathArc(cx, cy, 6.f, 38.f, 322.f);
-    g.PathStroke(color, 2.f, RoundStroke());
-    g.PathLine(cx, cy - 7.f, cx, cy - 1.f);
-    g.PathStroke(color, 2.f, RoundStroke());
-  }
-
-  void OnMouseDown(float x, float y, const IMouseMod& mod) override
-  {
-    SetValue(GetValue() > 0.5 ? 0. : 1.);
-    SetDirty(true);
-  }
-};
-
-/** Record-style button. It pauses and resumes the level display. */
-class ClampFreezeButton final : public IControl
-{
-public:
-  ClampFreezeButton(const IRECT& bounds, ClampLevelDisplay* pDisplay)
-  : IControl(bounds)
-  , mDisplay(pDisplay)
-  {
-    mDblAsSingleClick = true;
-  }
-
-  void Draw(IGraphics& g) override
-  {
-    const IColor color = mDisplay->IsFrozen() ? kTextDim : kAccent;
-    g.DrawCircle(color, mRECT.MW(), mRECT.MH(), 6.4f, nullptr, 1.5f);
-    g.FillCircle(color, mRECT.MW(), mRECT.MH(), 4.4f);
-  }
-
-  void OnMouseDown(float x, float y, const IMouseMod& mod) override
-  {
-    mDisplay->SetFrozen(!mDisplay->IsFrozen());
-    SetDirty(false);
-  }
-
-private:
-  ClampLevelDisplay* mDisplay;
-};
-
-/** Overlay with short help text. A click on it closes it. */
-class ClampInfoOverlay final : public IControl
-{
-public:
-  explicit ClampInfoOverlay(const IRECT& bounds)
-  : IControl(bounds)
-  {
-  }
-
-  void Draw(IGraphics& g) override
-  {
-    static const char* kLines[] = {
-      "CEILING  Level where clipping starts. Drag the knob or the red tag.",
-      "IN / OUT  Gain before and after the clipper.",
-      "SHAPE  0 is the softest curve, 1 is a hard clip. Drag the number.",
-      "TYPE  A blends tanh and hard clip. B uses a soft-knee curve.",
-      "MODE  Clip L and R, one side, or mid/side components.",
-      "OFF / 2X ... 16X  Oversampling. Click to step, right-click for a list.",
-      "Red button  Pause or resume the level display.",
-      "Power  Bypass.",
-    };
-
-    g.FillRoundRect(IColor(245, 14, 14, 14), mRECT, kCardRadius);
-    g.DrawRoundRect(Grey(48), mRECT.GetPadded(-0.5f), kCardRadius);
-    g.DrawText(IText(12.f, kTextBright, kFontBold, EAlign::Near), "About Clamp Port", IRECT(mRECT.L + 16.f, mRECT.T + 12.f, mRECT.R, mRECT.T + 30.f));
-
-    const IText text(9.5f, kTextMid, kFontRegular, EAlign::Near);
-    float y = mRECT.T + 40.f;
-    for (const char* pLine : kLines)
-    {
-      g.DrawText(text, pLine, IRECT(mRECT.L + 16.f, y, mRECT.R - 16.f, y + 14.f));
-      y += 20.f;
-    }
-
-    g.DrawText(IText(9.5f, kAccent, kFontRegular, EAlign::Near), "Unofficial macOS port. The original Clamp is by Outobugi.", IRECT(mRECT.L + 16.f, mRECT.B - 30.f, mRECT.R - 16.f, mRECT.B - 16.f));
-  }
-
-  void OnMouseDown(float x, float y, const IMouseMod& mod) override
-  {
-    Hide(true);
-  }
-};
-
-/** "?" button. It shows the info overlay. */
-class ClampHelpButton final : public IControl
-{
-public:
-  ClampHelpButton(const IRECT& bounds, IControl* pOverlay)
-  : IControl(bounds)
-  , mOverlay(pOverlay)
-  {
-    mDblAsSingleClick = true;
-    mText = IText(19.5f, kTextBright, kFontBold);
-  }
-
-  void Draw(IGraphics& g) override
-  {
-    g.DrawText(mText, "?", mRECT);
-  }
-
-  void OnMouseDown(float x, float y, const IMouseMod& mod) override
-  {
-    mOverlay->Hide(!mOverlay->IsHidden());
-  }
-
-private:
-  IControl* mOverlay;
-};
-
-/** Footer toggle for hover tooltips. */
-class ClampTooltipsToggle final : public IControl
-{
-public:
-  explicit ClampTooltipsToggle(const IRECT& bounds)
-  : IControl(bounds)
-  {
-    mDblAsSingleClick = true;
-  }
-
-  void Draw(IGraphics& g) override
-  {
-    const float cx = mRECT.L + 5.2f;
-    const float cy = mRECT.MH();
-    g.DrawCircle(kTextMid, cx, cy, 4.1f, nullptr, 1.2f);
-    if (GetUI()->TooltipsEnabled())
-      g.FillCircle(kTextMid, cx, cy, 2.f);
-    g.DrawText(IText(10.5f, kTextMid, kFontRegular, EAlign::Near), "Tooltips", mRECT.GetReducedFromLeft(13.3f));
-  }
-
-  void OnMouseDown(float x, float y, const IMouseMod& mod) override
-  {
-    GetUI()->EnableTooltips(!GetUI()->TooltipsEnabled());
-    SetDirty(false);
-  }
-};
+  const int nParams = pGraphics->GetDelegate()->NParams();
+  for (int i = 0; i < nParams; i++)
+    pGraphics->ForControlWithParam(i, [bypassed](IControl* pControl) { pControl->SetDisabled(bypassed); });
+
+  for (int i = 0; i < 3 && i < pGraphics->NControls(); i++)
+    pGraphics->GetControl(i)->SetDisabled(bypassed);
+}
 } // namespace
 
-void AttachClampUI(IGraphics* pGraphics, int displayCtrlTag)
+void AttachClampUI(IGraphics* pGraphics)
 {
   pGraphics->AttachCornerResizer(EUIResizerMode::Scale, false);
-  pGraphics->LoadFont(kFontRegular, INTER_REGULAR_FN);
-  pGraphics->LoadFont(kFontSemiBold, INTER_SEMIBOLD_FN);
-  pGraphics->LoadFont(kFontBold, INTER_BOLD_FN);
-  pGraphics->AttachBubbleControl(new IBubbleControl(IText(10.f, kTextBright, kFontSemiBold), Grey(22), Grey(60), 3.f));
+  pGraphics->AttachControl(new BackgroundPanel(pGraphics->GetBounds(), kColorBackground));
+  pGraphics->LoadFont(kTextFont, INTER_REGULAR_FN);
+  pGraphics->LoadFont(kLabelFont, INTER_SEMIBOLD_FN);
+  pGraphics->LoadFont(kTitleFont, INTER_BOLD_FN);
+  pGraphics->EnableMouseOver(true);
 
+  const IVStyle style = ClampStyle();
   const IRECT bounds = pGraphics->GetBounds();
-  const IRECT displayCard(3.f, 39.5f, 132.f, 297.f);
-  const IRECT controlsCard(135.4f, 39.5f, 396.4f, 297.f);
-  const float stripTop = 262.6f;
-  pGraphics->AttachControl(new ClampBackground(bounds, displayCard, controlsCard, stripTop));
 
-  auto* pDisplay = new ClampLevelDisplay(displayCard.GetReducedFromBottom(29.f), kCeiling);
-  pGraphics->AttachControl(pDisplay, displayCtrlTag)->SetTooltip("Level history: input to the clipper (light) and output (dark). Drag the red tag to set CEILING.");
-  pGraphics->AttachControl(new ClampEnumControl(IRECT(19.5f, 272.f, 115.7f, 291.f), kMode, IText(10.f, kAccent, kFontSemiBold), true))->SetTooltip("MODE: channels to clip");
+  // The body below the 36 px header and above the 20 px footer, split into a left third and the rest.
+  const IRECT b = bounds.GetReducedFromTop(36.f).GetReducedFromBottom(20.f).GetPadded(-1.5f);
+  const float splitX = b.R - b.W() / 1.5f;
+  const float barT = b.B - 36.f;
 
-  pGraphics->AttachControl(new ClampEnumControl(IRECT(266.5f, 11.f, 296.5f, 30.f), kOversampling, IText(11.5f, kTextBright, kFontSemiBold), false))->SetTooltip("Oversampling");
-  pGraphics->AttachControl(new ClampFreezeButton(IRECT(305.f, 11.f, 323.f, 29.f), pDisplay))->SetTooltip("Pause or resume the level display");
-  pGraphics->AttachControl(new ClampBypassButton(IRECT(371.f, 10.f, 389.f, 30.f), kBypass))->SetTooltip("BYPASS");
+  pGraphics->AttachControl(new FramePanel(IRECT(splitX, b.T, b.R, barT), kColorFrame, 1, b, 4));
+  pGraphics->AttachControl(new GlassPanel(IRECT(splitX, barT, b.R, b.B), kColorGlass, 2));
+  pGraphics->AttachControl(new GlassPanel(IRECT(b.L, b.T, splitX, b.B), kColorGlass, 0));
 
-  auto* pFader = pGraphics->AttachControl(new ClampFader(IRECT(148.6f, 94.f, 178.6f, 206.6f), kInputGain));
-  pFader->SetActionFunction(ShowBubbleVerticalActionFunc);
-  pFader->SetTooltip("IN: gain before the clipper");
-  pFader = pGraphics->AttachControl(new ClampFader(IRECT(352.8f, 94.f, 382.8f, 206.6f), kOutputGain));
-  pFader->SetActionFunction(ShowBubbleVerticalActionFunc);
-  pFader->SetTooltip("OUT: gain after the clipper");
+  // Bottom bar of the right panel: SHAPE, its curve icons, and TYPE.
+  pGraphics->AttachControl(new SimpleValueBox(IRECT(splitX + 50.f, barT, splitX + 120.8f, b.B), kShape, style));
+  pGraphics->AttachControl(new ShapeDisplay(IRECT(splitX + 20.f, barT, splitX + 35.f, b.B).GetScaledAboutCentre(0.9f), kShape, style, 0, true));
+  pGraphics->AttachControl(new ShapeDisplay(IRECT(splitX + 135.8f, barT, splitX + 150.8f, b.B).GetScaledAboutCentre(0.9f), kShape, style, 1, false));
+  pGraphics->AttachControl(new SimpleSpinBox(IRECT(splitX + 160.8f, barT, b.R - 20.f, b.B), kType, style))->SetTooltip("Clipper algorithm.");
 
-  pGraphics->AttachControl(new ClampCeilingKnob(IRECT(200.1f, 84.1f, 332.1f, 216.1f), kCeiling))->SetTooltip("CEILING: level where clipping starts");
-  pGraphics->AttachControl(new ClampShapeControl(IRECT(150.f, 271.f, 288.f, 292.f), kShape))->SetTooltip("SHAPE: 0 is soft, 1 is hard. Drag the number, or click a curve icon");
-  pGraphics->AttachControl(new ClampEnumControl(IRECT(292.f, 272.f, 380.f, 291.f), kType, IText(10.f, kAccent, kFontSemiBold), true))->SetTooltip("TYPE: clipper algorithm");
+  // Faders and the CEILING knob.
+  pGraphics->AttachControl(new Slider(IRECT(splitX, 87.5f, splitX + 60.f, 212.5f), kInputGain, style))->SetTooltip("Sets the input gain of chosen channel(s)");
+  pGraphics->AttachControl(new Slider(IRECT(b.R - 60.f, 87.5f, b.R, 212.5f), kOutputGain, style))->SetTooltip("Sets the output gain of chosen channel(s)");
+  pGraphics->AttachControl(new BigKnob((splitX + b.R) / 2.f, 150.f, 140.f, kCeiling, style));
 
-  pGraphics->AttachControl(new ClampTooltipsToggle(IRECT(4.f, 302.f, 60.f, 317.f)));
+  // Level display, the ceiling line over it, and MODE.
+  pGraphics->AttachControl(new DynamicsDisplay(IRECT(b.L, 62.5f, splitX, barT), style, -48.f, 0.f), kCtrlTagDisplay);
+  pGraphics->AttachControl(new ThresholdSlider(IRECT(b.L, 52.5f, splitX, barT + 10.f), kCeiling, style));
+  pGraphics->AttachControl(new SimpleSpinBox(IRECT(b.L + 20.f, barT, splitX - 20.f, b.B), kMode, style));
 
-  auto* pOverlay = new ClampInfoOverlay(IRECT(3.f, 39.5f, 396.4f, 297.f));
-  pGraphics->AttachControl(new ClampHelpButton(IRECT(339.f, 9.f, 355.f, 31.f), pOverlay))->SetTooltip("About");
-  pGraphics->AttachControl(pOverlay)->Hide(true);
+  pGraphics->AttachBubbleControl(new ValueDisplay(style.labelText));
+
+  // Header and its children (Header::OnAttached 0x180540da0): the logo, the
+  // title, and four 33 px cells from the right: power, info, accent colour
+  // and oversampling. Each button is its cell scaled by 0.8.
+  auto* pHeader = new Header(bounds);
+  pGraphics->AttachControl(pHeader, kCtrlTagHeader);
+
+  const IRECT inner(bounds.L + 3.f, bounds.T + 3.f, bounds.R - 3.f, bounds.T + 36.f);
+  const float cell = inner.H();
+  const float cellsL = inner.R - 4.f * cell;
+  auto button = [&](int i) { return IRECT(cellsL + i * cell, inner.T, cellsL + (i + 1) * cell, inner.B).GetScaledAboutCentre(0.8f); };
+
+  pGraphics->AttachControl(new SVGButton(IRECT(inner.L, inner.T, inner.L + cell, inner.B).GetScaledAboutCentre(0.75f), kNoParameter, DrawLogoIcon, [](IControl* pCaller) {
+    // The original opens the author's site. The port credits the author the same way.
+    pCaller->GetUI()->OpenURL(kAuthorURL);
+  }));
+
+  std::string title = PLUG_NAME;
+  std::transform(title.begin(), title.end(), title.begin(), [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
+  pGraphics->AttachControl(new ITextControl(IRECT(inner.L + cell + 5.f, inner.T, inner.R, inner.B), title.c_str(), TitleText(), kColorTransparent));
+
+  pGraphics->AttachControl(new SVGButton(button(3), kBypass, DrawPowerIcon, [](IControl* pCaller) {
+    ApplyBypass(pCaller->GetUI(), pCaller->GetValue() >= 0.5);
+  }));
+  pGraphics->AttachControl(new SVGButton(button(2), kNoParameter, DrawInfoIcon, [pHeader](IControl*) {
+    pHeader->ToggleAbout();
+  }));
+  pHeader->mColorMenu = new ColorMenu(button(1), style);
+  pGraphics->AttachControl(pHeader->mColorMenu);
+  pGraphics->AttachControl(new ParamMenu(button(0), kOversampling, style));
+
+  // Like Header::OnAttached, grey out the controls if the editor opens bypassed.
+  if (pGraphics->GetDelegate()->GetParam(kBypass)->Value() >= 0.5)
+    ApplyBypass(pGraphics, true);
+
+  pGraphics->AttachControl(new Footer(bounds), kCtrlTagFooter);
 }
-#endif
+
+void ApplyClampSettings(IGraphics* pGraphics, const ClampSettings& settings)
+{
+  if (!pGraphics)
+    return;
+
+  pGraphics->Resize(PLUG_WIDTH, PLUG_HEIGHT, settings.scale);
+
+  if (auto* pHeader = dynamic_cast<Header*>(pGraphics->GetControlWithTag(kCtrlTagHeader)); pHeader && pHeader->mColorMenu)
+    pHeader->mColorMenu->SetSelected(settings.color);
+
+  if (auto* pFooter = dynamic_cast<Footer*>(pGraphics->GetControlWithTag(kCtrlTagFooter)); pFooter && pFooter->GetTooltipDisplay())
+    pFooter->GetTooltipDisplay()->SetDisabled(settings.tooltips == 0);
+}
+
+ClampSettings CollectClampSettings(IGraphics* pGraphics)
+{
+  ClampSettings settings;
+  settings.scale = pGraphics->GetDrawScale();
+
+  if (auto* pHeader = dynamic_cast<Header*>(pGraphics->GetControlWithTag(kCtrlTagHeader)); pHeader && pHeader->mColorMenu)
+    settings.color = pHeader->mColorMenu->GetSelected();
+
+  if (auto* pFooter = dynamic_cast<Footer*>(pGraphics->GetControlWithTag(kCtrlTagFooter)); pFooter && pFooter->GetTooltipDisplay())
+    settings.tooltips = pFooter->GetTooltipDisplay()->IsDisabled() ? 0 : 1;
+
+  return settings;
+}
